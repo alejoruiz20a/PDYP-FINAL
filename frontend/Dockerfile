@@ -1,7 +1,9 @@
 # ---- Etapa de build: compila la SPA con pnpm ----
-FROM node:20-slim AS build
+# Node 22: pnpm >= 11 requiere Node 22.13+ (usa el módulo node:sqlite).
+FROM node:22-slim AS build
 
-# Habilita pnpm via corepack (incluido en node 20)
+# Habilita pnpm via corepack. La versión exacta la fija `packageManager`
+# en package.json, así la build es reproducible.
 RUN corepack enable
 
 WORKDIR /app
