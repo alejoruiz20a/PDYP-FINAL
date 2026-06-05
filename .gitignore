@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────
+#  Secrets / entorno
+# ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ─────────────────────────────────────────────
+#  Python (uv)
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.uv/
+uv.lock
+# (uv.lock se ignora aquí porque cada servicio maneja el suyo;
+#  si quieres builds reproducibles, quita la línea anterior y commitea los lock)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─────────────────────────────────────────────
+#  Node / pnpm (frontend)
+# ─────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# ─────────────────────────────────────────────
+#  Logs / temporales
+# ─────────────────────────────────────────────
+*.log
+logs/
+tmp/
+*.tmp
+
+# ─────────────────────────────────────────────
+#  Docker
+# ─────────────────────────────────────────────
+*.pid
+
+# ─────────────────────────────────────────────
+#  ROS2 / colcon
+# ─────────────────────────────────────────────
+build/
+install/
+log/
+
+# ─────────────────────────────────────────────
+#  Editor / OS
+# ─────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ─────────────────────────────────────────────
+#  PlatformIO (firmware ESP32)
+# ─────────────────────────────────────────────
+.pio/
+firmware/.pio/
+
+# Configuración local de Claude Code
+.claude/

@@ -1,0 +1,144 @@
+# ============================================================
+#  Plataforma de gestión del carrito RC con cámara + VLM + LLM
+#  Arquitectura de microservicios. Todo contenedorizado.
+#
+#  Levantar:   docker compose up --build
+#  Detener:    docker compose down
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  #  micro-ROS Agent (oficial de microROS)
+  #  El ESP32 se conecta por WiFi/UDP a este agente en el host.
+  #  Expone el puerto 8888/udp hacia la LAN.
+  # ----------------------------------------------------------
+  micro-ros-agent:
+    image: microros/micro-ros-agent:jazzy
+    command: udp4 --port ${MICRO_ROS_AGENT_PORT:-8888}
+    # Publicamos el puerto UDP del agent. En Docker Desktop (WSL2) esto reenvía
+    # el UDP 8888 desde Windows hacia el contenedor, así el ESP32 lo alcanza por
+    # la IP del PC (192.168.1.35:8888). NO usamos network_mode:host porque en
+    # Windows el host es WSL2, no la red física.
+    ports:
+      - "${MICRO_ROS_AGENT_PORT:-8888}:${MICRO_ROS_AGENT_PORT:-8888}/udp"
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  ros2-bridge: nodo ROS2 + API HTTP.
+  #  Recibe acciones del llm-service y publica geometry_msgs/Twist
+  #  en /cmd_vel durante una duración, luego detiene.
+  #  Comparte la red `ros2net` con el agent para descubrirse por DDS.
+  # ----------------------------------------------------------
+  ros2-bridge:
+    build: ./services/ros2-bridge
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - CMD_VEL_TOPIC=${CMD_VEL_TOPIC:-/cmd_vel}
+      - BRIDGE_PORT=8001
+    expose:
+      - "8001"
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  instruction-service: persiste el historial en MongoDB Atlas.
+  # ----------------------------------------------------------
+  instruction-service:
+    build: ./services/instruction-service
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DB=${MONGODB_DB:-carrito_rc}
+    expose:
+      - "8000"
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  vlm-service: capta un frame de la cámara IP y lo describe
+  #  con Gemini (VLM) vía OpenRouter.
+  # ----------------------------------------------------------
+  vlm-service:
+    build: ./services/vlm-service
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.0-flash-001}
+      - OPENROUTER_SITE_URL=${OPENROUTER_SITE_URL:-}
+      - OPENROUTER_SITE_NAME=${OPENROUTER_SITE_NAME:-}
+      - CAMERA_SNAPSHOT_URL=${CAMERA_SNAPSHOT_URL}
+    expose:
+      - "8000"
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  llm-service: decide la acción de movimiento coherente con
+  #  la instrucción del usuario + lo que ve el VLM.
+  # ----------------------------------------------------------
+  llm-service:
+    build: ./services/llm-service
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.0-flash-001}
+      - OPENROUTER_SITE_URL=${OPENROUTER_SITE_URL:-}
+      - OPENROUTER_SITE_NAME=${OPENROUTER_SITE_NAME:-}
+    expose:
+      - "8000"
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  api-gateway: punto de entrada. Orquesta el flujo:
+  #  usuario -> VLM -> LLM -> ROS2 -> Mongo.
+  # ----------------------------------------------------------
+  api-gateway:
+    build: ./services/api-gateway
+    environment:
+      - VLM_SERVICE_URL=${VLM_SERVICE_URL:-http://vlm-service:8000}
+      - LLM_SERVICE_URL=${LLM_SERVICE_URL:-http://llm-service:8000}
+      - INSTRUCTION_SERVICE_URL=${INSTRUCTION_SERVICE_URL:-http://instruction-service:8000}
+      # El bridge ahora vive en la red docker -> lo alcanzamos por nombre de servicio.
+      - ROS2_BRIDGE_URL=http://ros2-bridge:8001
+    ports:
+      - "8080:8000"             # expuesto al navegador / frontend
+    depends_on:
+      - vlm-service
+      - llm-service
+      - instruction-service
+      - ros2-bridge
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  frontend: SPA de React servida por nginx.
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - VITE_API_GATEWAY_URL=${VITE_API_GATEWAY_URL:-http://localhost:8080}
+    ports:
+      - "5173:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - ros2net
+    restart: unless-stopped
+
+# ============================================================
+#  Redes
+# ============================================================
+networks:
+  # Red única donde se descubren todos los servicios (incluido el DDS
+  # entre micro-ros-agent y ros2-bridge).
+  ros2net:
+    driver: bridge
