@@ -1,25 +1,23 @@
 /*
 ==========================================================
-ROBOT DIFERENCIAL ROS2 + MICRO-ROS + ESP32 + L298N
-Versión: 1.0 Producción
-==========================================================
+ESP32 + micro-ROS + ROS2 Jazzy + L298N
+Robot diferencial
 
-Topico ROS:
+Topico:
     /cmd_vel
 
-Control:
-    linear.x  -> avance/retroceso
-    angular.z -> giro
+linear.x
+    +1 adelante
+    -1 atrás
 
-Hardware:
-    ESP32 DevKit V1
-    L298N
-    2 Motores DC
-
+angular.z
+    +1 izquierda
+    -1 derecha
 ==========================================================
 */
 
 #include <Arduino.h>
+#include <WiFi.h>
 #include <micro_ros_arduino.h>
 
 #include <rcl/rcl.h>
@@ -28,22 +26,20 @@ Hardware:
 
 #include <geometry_msgs/msg/twist.h>
 
+#include <driver/ledc.h>
+
 /*=========================================================
-  CONFIGURACIÓN WIFI
+  WIFI
 =========================================================*/
 
-// IMPORTANTE: pon aquí el nombre y contraseña de TU red WiFi
-// (debe ser la misma red a la que conectas el celular con la cámara).
-char ssid[] = "TU_RED_WIFI";
-char password[] = "TU_PASSWORD_WIFI";
+char ssid[] = "Red123";
+char password[] = "red1234.567";
 
-// IP de tu PC en la red local (donde corre Docker Desktop / el micro-ros-agent).
-// Verifícala con `ipconfig` en Windows; puede cambiar si reinicias el router.
-char agent_ip[] = "192.168.1.35";
+char agent_ip[] = "192.168.43.220";
 uint32_t agent_port = 8888;
 
 /*=========================================================
-  PINES L298N
+  L298N
 =========================================================*/
 
 #define ENA 25
@@ -58,25 +54,23 @@ uint32_t agent_port = 8888;
   PWM ESP32
 =========================================================*/
 
-#define PWM_FREQ       5000
-#define PWM_RESOLUTION 8
+#define PWM_FREQ       1000
+#define PWM_RESOLUTION LEDC_TIMER_10_BIT
+#define PWM_TIMER      LEDC_TIMER_0
 
-#define CH_LEFT  0
-#define CH_RIGHT 1
+#define PWM_LEFT   LEDC_CHANNEL_0
+#define PWM_RIGHT  LEDC_CHANNEL_1
 
 /*=========================================================
   SEGURIDAD
 =========================================================*/
-
-// Si no llega cmd_vel durante este tiempo
-// el robot se detiene automáticamente.
 
 const uint32_t CMD_TIMEOUT_MS = 1000;
 
 unsigned long last_cmd_time = 0;
 
 /*=========================================================
-  ROS2
+  ROS
 =========================================================*/
 
 rcl_node_t node;
@@ -90,24 +84,80 @@ geometry_msgs__msg__Twist twist_msg;
   MACROS
 =========================================================*/
 
-#define RCCHECK(fn)                                      \
-{                                                        \
-  rcl_ret_t temp_rc = fn;                                \
-  if ((temp_rc != RCL_RET_OK))                           \
-  {                                                      \
-    Serial.printf("ERROR LINEA %d\n", __LINE__);         \
-    while (1) delay(100);                                \
-  }                                                      \
+#define RCCHECK(fn)                                                \
+{                                                                  \
+  rcl_ret_t temp_rc = fn;                                          \
+  if (temp_rc != RCL_RET_OK)                                       \
+  {                                                                \
+    Serial.printf("ERROR LINEA %d rc=%d\n", __LINE__, temp_rc);    \
+    while(1) delay(100);                                           \
+  }                                                                \
 }
 
 /*=========================================================
-  FUNCIONES MOTOR
+  PWM
+=========================================================*/
+
+void setupPWM()
+{
+  ledc_timer_config_t timer_conf =
+  {
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .duty_resolution = PWM_RESOLUTION,
+    .timer_num = PWM_TIMER,
+    .freq_hz = PWM_FREQ,
+    .clk_cfg = LEDC_AUTO_CLK
+  };
+
+  ledc_timer_config(&timer_conf);
+
+  ledc_channel_config_t left_channel =
+  {
+    .gpio_num = ENA,
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .channel = PWM_LEFT,
+    .timer_sel = PWM_TIMER,
+    .duty = 0,
+    .hpoint = 0
+  };
+
+  ledc_channel_config_t right_channel =
+  {
+    .gpio_num = ENB,
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .channel = PWM_RIGHT,
+    .timer_sel = PWM_TIMER,
+    .duty = 0,
+    .hpoint = 0
+  };
+
+  ledc_channel_config(&left_channel);
+  ledc_channel_config(&right_channel);
+}
+
+/*=========================================================
+  MOTORES
 =========================================================*/
 
 void stopMotors()
 {
-  ledcWrite(CH_LEFT, 0);
-  ledcWrite(CH_RIGHT, 0);
+  ledc_set_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_LEFT,
+      0);
+
+  ledc_update_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_LEFT);
+
+  ledc_set_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_RIGHT,
+      0);
+
+  ledc_update_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_RIGHT);
 
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
@@ -120,14 +170,15 @@ void setLeftMotor(float speed)
 {
   speed = constrain(speed, -1.0, 1.0);
 
-  uint8_t pwm = abs(speed) * 255;
+  uint32_t pwm =
+      (uint32_t)(fabs(speed) * 1023);
 
-  if (speed > 0)
+  if(speed > 0)
   {
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
   }
-  else if (speed < 0)
+  else if(speed < 0)
   {
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, HIGH);
@@ -138,21 +189,29 @@ void setLeftMotor(float speed)
     digitalWrite(IN2, LOW);
   }
 
-  ledcWrite(CH_LEFT, pwm);
+  ledc_set_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_LEFT,
+      pwm);
+
+  ledc_update_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_LEFT);
 }
 
 void setRightMotor(float speed)
 {
   speed = constrain(speed, -1.0, 1.0);
 
-  uint8_t pwm = abs(speed) * 255;
+  uint32_t pwm =
+      (uint32_t)(fabs(speed) * 1023);
 
-  if (speed > 0)
+  if(speed > 0)
   {
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
   }
-  else if (speed < 0)
+  else if(speed < 0)
   {
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, HIGH);
@@ -163,7 +222,14 @@ void setRightMotor(float speed)
     digitalWrite(IN4, LOW);
   }
 
-  ledcWrite(CH_RIGHT, pwm);
+  ledc_set_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_RIGHT,
+      pwm);
+
+  ledc_update_duty(
+      LEDC_LOW_SPEED_MODE,
+      PWM_RIGHT);
 }
 
 /*=========================================================
@@ -173,25 +239,21 @@ void setRightMotor(float speed)
 void cmd_vel_callback(const void * msg_in)
 {
   const geometry_msgs__msg__Twist * msg =
-      (const geometry_msgs__msg__Twist *)msg_in;
+      (const geometry_msgs__msg__Twist *) msg_in;
 
   last_cmd_time = millis();
 
-  float linear  = constrain(msg->linear.x, -1.0, 1.0);
-  float angular = constrain(msg->angular.z, -1.0, 1.0);
+  float linear =
+      constrain(msg->linear.x, -1.0, 1.0);
 
-  /*
-      Mezcla diferencial
+  float angular =
+      constrain(msg->angular.z, -1.0, 1.0);
 
-      linear = avance
-      angular = giro
-  */
+  float left =
+      constrain(linear - angular, -1.0, 1.0);
 
-  float left  = linear - angular;
-  float right = linear + angular;
-
-  left  = constrain(left,  -1.0, 1.0);
-  right = constrain(right, -1.0, 1.0);
+  float right =
+      constrain(linear + angular, -1.0, 1.0);
 
   setLeftMotor(left);
   setRightMotor(right);
@@ -218,35 +280,23 @@ void setup()
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
 
+  setupPWM();
+
   stopMotors();
 
-  // PWM ESP32
-
-  ledcSetup(CH_LEFT, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(ENA, CH_LEFT);
-
-  ledcSetup(CH_RIGHT, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(ENB, CH_RIGHT);
-
-  //prueba de pwm
+  // === TEST DE MOTORES (5 segundos) ===
   Serial.println("TEST PWM");
-
-digitalWrite(IN1, HIGH);
-digitalWrite(IN2, LOW);
-
-digitalWrite(IN3, HIGH);
-digitalWrite(IN4, LOW);
-
-ledcWrite(CH_LEFT, 255);
-ledcWrite(CH_RIGHT, 255);
-
-delay(5000);
-
-stopMotors();
-
-//fin prueba
-
-
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, PWM_LEFT, 972);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, PWM_LEFT);
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, PWM_RIGHT, 972);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, PWM_RIGHT);
+  delay(5000);
+  stopMotors();
+  // ================================
 
   Serial.println("Conectando micro-ROS...");
 
@@ -256,13 +306,11 @@ stopMotors();
       agent_ip,
       agent_port);
 
-  while (!rmw_uros_ping_agent(1000, 1))
-  {
-    Serial.println("Esperando agente...");
-    delay(1000);
-  }
+  // Esperar a que el transporte WiFi+micro-ROS se estabilice
+  delay(3000);
 
-  Serial.println("Agente encontrado");
+  Serial.println("Listo para micro-ROS");
+  Serial.printf("Heap libre: %d bytes\n", ESP.getFreeHeap());
 
   rcl_allocator_t allocator =
       rcl_get_default_allocator();
@@ -321,11 +369,8 @@ void loop()
       &executor,
       RCL_MS_TO_NS(10));
 
-  // Seguridad:
-  // Si se pierde comunicación ROS2
-  // el robot se detiene.
-
-  if (millis() - last_cmd_time > CMD_TIMEOUT_MS)
+  if(millis() - last_cmd_time >
+     CMD_TIMEOUT_MS)
   {
     stopMotors();
   }
