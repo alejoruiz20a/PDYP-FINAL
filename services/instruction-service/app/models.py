@@ -30,13 +30,28 @@ class Action(BaseModel):
 
 
 class InstructionCreate(BaseModel):
-    """Payload para guardar un ciclo de instrucción en el historial."""
+    """Payload para crear un registro de instrucción en el historial.
+
+    En la fase 1 (creación inmediata) solo se envía user_text y status.
+    En la fase 2 (actualización por el pipeline) se llenan el resto.
+    """
 
     user_text: str = Field(..., description="Instrucción en lenguaje natural del usuario")
-    vlm_observation: str = Field(..., description="Descripción de la escena por el VLM")
-    action: Action = Field(..., description="Acción decidida por el LLM")
+    vlm_observation: Optional[str] = Field(None, description="Descripción de la escena por el VLM")
+    action: Optional[Action] = Field(None, description="Acción decidida por el LLM")
     reasoning: Optional[str] = Field(None, description="Por qué el LLM eligió esta acción")
-    executed: bool = Field(False, description="Si la acción se envió al carrito con éxito")
+    executed: Optional[bool] = Field(None, description="Si la acción se envió al carrito con éxito")
+    status: str = Field("pending", description="Estado: pending | processing | completed | failed")
+
+
+class InstructionUpdate(BaseModel):
+    """Payload para actualizar un registro existente (PATCH)."""
+
+    vlm_observation: Optional[str] = None
+    action: Optional[Action] = None
+    reasoning: Optional[str] = None
+    executed: Optional[bool] = None
+    status: Optional[str] = None
 
 
 class InstructionOut(InstructionCreate):

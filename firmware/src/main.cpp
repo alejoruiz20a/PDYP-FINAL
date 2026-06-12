@@ -286,6 +286,7 @@ void setup()
 
   // === TEST DE MOTORES (5 segundos) ===
   Serial.println("TEST PWM");
+
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH);
@@ -298,7 +299,39 @@ void setup()
   stopMotors();
   // ================================
 
-  Serial.println("Conectando micro-ROS...");
+  // Conectar WiFi explícitamente con diagnóstico
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Conectando WiFi");
+  int wifi_attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && wifi_attempts < 40)
+  {
+    delay(500);
+    Serial.print(".");
+    wifi_attempts++;
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.print("WiFi OK, IP: ");
+    Serial.println(WiFi.localIP());
+  }
+  else
+  {
+    Serial.print("WiFi FALLO (codigo ");
+    Serial.print(WiFi.status());
+    Serial.println("):");
+    switch (WiFi.status())
+    {
+      case WL_NO_SSID_AVAIL: Serial.println("  Red no encontrada"); break;
+      case WL_CONNECT_FAILED: Serial.println("  Contrasena incorrecta"); break;
+      case WL_IDLE_STATUS: Serial.println("  Timeout de conexion"); break;
+      default: Serial.println("  Error desconocido"); break;
+    }
+    while (1) delay(100);
+  }
 
   set_microros_wifi_transports(
       ssid,

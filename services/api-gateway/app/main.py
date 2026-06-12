@@ -2,18 +2,19 @@
 
 Es el único servicio expuesto al frontend. Orquesta el ciclo:
 
-  1. Recibe la instrucción del usuario en lenguaje natural.
-  2. Pide al vlm-service que mire por la cámara y describa la escena.
-  3. Pide al llm-service que decida una acción coherente (orden + visión).
-  4. Envía la acción al ros2-bridge para que mueva el carrito.
-  5. Guarda todo el ciclo en el instruction-service (historial Mongo).
+   1. Recibe la instrucción del usuario en lenguaje natural.
+   2. Guarda inmediatamente en instruction-service con status "pending".
+   3. Procesa en background: VLM → LLM → ROS2.
+   4. Actualiza el registro en instruction-service con el resultado.
 
 No contiene lógica de IA ni de ROS: solo coordina a los microservicios.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -22,12 +23,52 @@ from pydantic import BaseModel, Field
 
 VLM_SERVICE_URL = os.environ.get("VLM_SERVICE_URL", "http://vlm-service:8000")
 LLM_SERVICE_URL = os.environ.get("LLM_SERVICE_URL", "http://llm-service:8000")
+
+
+def _extract_detail(exc: httpx.HTTPError) -> str:
+    """Extrae el mensaje 'detail' del body de una respuesta HTTP error, si existe."""
+    if hasattr(exc, "response") and exc.response is not None:
+        try:
+            body = exc.response.json()
+            if isinstance(body, dict) and "detail" in body:
+                return str(body["detail"])
+        except Exception:
+            pass
+    return ""
+
+
+def _user_hint(raw: str) -> str:
+    """Traduce fragmentos de errores internos a mensajes para el usuario."""
+    hints = [
+        ("No endpoints found", "El modelo de IA fue descontinuado. Actualizá OPENROUTER_MODEL en el .env."),
+        ("Insufficient credits", "La cuenta de OpenRouter no tiene créditos suficientes para usar la IA."),
+        ("401", "Error de autenticación con la IA. Revisá OPENROUTER_API_KEY en el .env."),
+        ("429", "Demasiadas solicitudes a la IA. Esperá unos segundos y probá de nuevo."),
+    ]
+    for key, hint in hints:
+        if key in raw:
+            return hint
+    return "Revisá que el WiFi tenga acceso a internet y que los servicios estén funcionando."
+
 INSTRUCTION_SERVICE_URL = os.environ.get(
     "INSTRUCTION_SERVICE_URL", "http://instruction-service:8000"
 )
 ROS2_BRIDGE_URL = os.environ.get("ROS2_BRIDGE_URL", "http://ros2-bridge:8001")
+CAMERA_SNAPSHOT_URL = os.environ.get("CAMERA_SNAPSHOT_URL")
 
-app = FastAPI(title="api-gateway")
+http_client: httpx.AsyncClient | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Inicializa el cliente HTTP compartido al arrancar."""
+    global http_client
+    http_client = httpx.AsyncClient(timeout=120.0)
+    yield
+    await http_client.aclose()
+
+
+app = FastAPI(title="api-gateway", lifespan=lifespan)
 
 # El frontend corre en otro origen (5173); habilitamos CORS para el navegador.
 app.add_middleware(
@@ -44,14 +85,10 @@ class CommandRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Orden en lenguaje natural")
 
 
-class CommandResponse(BaseModel):
-    """Resultado del ciclo completo, devuelto al frontend."""
-
-    user_text: str
-    vlm_observation: str
-    action: dict
-    executed: bool
-    instruction_id: str | None = None
+@app.get("/camera/config")
+async def camera_config():
+    """Expone la URL de la cámara configurada para que el frontend la consuma."""
+    return {"snapshot_url": CAMERA_SNAPSHOT_URL}
 
 
 @app.get("/health")
@@ -60,33 +97,63 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/command", response_model=CommandResponse)
-async def command(req: CommandRequest) -> CommandResponse:
-    """Ejecuta el ciclo completo para una instrucción del usuario."""
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        # 1) Percepción: el VLM mira por la cámara y describe la escena.
-        try:
-            vlm_resp = await http.post(f"{VLM_SERVICE_URL}/observe")
-            vlm_resp.raise_for_status()
-            vlm_observation = vlm_resp.json()["observation"]
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"vlm-service falló: {exc}")
+@app.post("/command")
+async def command(req: CommandRequest):
+    """Ejecuta el ciclo completo para una instrucción del usuario.
 
-        # 2) Decisión: el LLM combina la orden + la observación visual.
-        try:
-            llm_resp = await http.post(
-                f"{LLM_SERVICE_URL}/decide",
-                json={"user_text": req.text, "vlm_observation": vlm_observation},
-            )
-            llm_resp.raise_for_status()
-            action = llm_resp.json()
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"llm-service falló: {exc}")
+    Fase 1 (inmediata): guarda en instruction-service con status "pending"
+    y devuelve {id, user_text, status} al toque.
 
-        # 3) Actuación: mandamos la acción al carrito vía ROS2.
+    Fase 2 (background): VLM → LLM → ROS2 → actualiza el registro.
+    """
+    # Fase 1: guardar inmediatamente con status "pending"
+    try:
+        save_resp = await http_client.post(
+            f"{INSTRUCTION_SERVICE_URL}/instructions",
+            json={"user_text": req.text, "status": "pending"},
+        )
+        save_resp.raise_for_status()
+        saved = save_resp.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo registrar la instrucción: {exc}",
+        )
+
+    instruction_id = saved["id"]
+
+    # Lanzar pipeline en background (no esperamos)
+    asyncio.create_task(_process_pipeline(instruction_id, req.text))
+
+    return {"id": instruction_id, "user_text": req.text, "status": "pending"}
+
+
+async def _process_pipeline(instruction_id: str, user_text: str):
+    """Ejecuta VLM → LLM → ROS2 en background y actualiza Mongo."""
+    try:
+        # Marcar como processing
+        await http_client.patch(
+            f"{INSTRUCTION_SERVICE_URL}/instructions/{instruction_id}",
+            json={"status": "processing"},
+        )
+
+        # 1) Percepción: VLM
+        vlm_resp = await http_client.post(f"{VLM_SERVICE_URL}/observe")
+        vlm_resp.raise_for_status()
+        vlm_observation = vlm_resp.json()["observation"]
+
+        # 2) Decisión: LLM
+        llm_resp = await http_client.post(
+            f"{LLM_SERVICE_URL}/decide",
+            json={"user_text": user_text, "vlm_observation": vlm_observation},
+        )
+        llm_resp.raise_for_status()
+        action = llm_resp.json()
+
+        # 3) Actuación: ROS2
         executed = False
         try:
-            ros_resp = await http.post(
+            ros_resp = await http_client.post(
                 f"{ROS2_BRIDGE_URL}/execute",
                 json={
                     "linear": action["linear"],
@@ -96,43 +163,42 @@ async def command(req: CommandRequest) -> CommandResponse:
             )
             ros_resp.raise_for_status()
             executed = ros_resp.json().get("executed", False)
-        except httpx.HTTPError as exc:
-            # No abortamos: igual guardamos el ciclo marcando executed=False.
-            # El carrito puede estar apagado pero el historial debe registrar el intento.
+        except httpx.HTTPError:
             executed = False
-            _ = exc
 
-        # 4) Persistencia: guardamos el ciclo completo en el historial.
-        instruction_id: str | None = None
-        try:
-            save_resp = await http.post(
-                f"{INSTRUCTION_SERVICE_URL}/instructions",
-                json={
-                    "user_text": req.text,
-                    "vlm_observation": vlm_observation,
-                    "action": {
-                        "type": action["type"],
-                        "linear": action["linear"],
-                        "angular": action["angular"],
-                        "duration_s": action["duration_s"],
-                    },
-                    "reasoning": action.get("reasoning"),
-                    "executed": executed,
+        # Actualizar Mongo con resultado exitoso
+        await http_client.patch(
+            f"{INSTRUCTION_SERVICE_URL}/instructions/{instruction_id}",
+            json={
+                "status": "completed",
+                "vlm_observation": vlm_observation,
+                "action": {
+                    "type": action["type"],
+                    "linear": action["linear"],
+                    "angular": action["angular"],
+                    "duration_s": action["duration_s"],
                 },
+                "reasoning": action.get("reasoning"),
+                "executed": executed,
+            },
+        )
+    except httpx.TimeoutException:
+        try:
+            await http_client.patch(
+                f"{INSTRUCTION_SERVICE_URL}/instructions/{instruction_id}",
+                json={"status": "failed", "vlm_observation": "Error: la IA tardó demasiado en responder."},
             )
-            save_resp.raise_for_status()
-            instruction_id = save_resp.json().get("id")
-        except httpx.HTTPError as exc:
-            # El historial es importante pero no debe tumbar la respuesta al usuario.
-            _ = exc
-
-    return CommandResponse(
-        user_text=req.text,
-        vlm_observation=vlm_observation,
-        action=action,
-        executed=executed,
-        instruction_id=instruction_id,
-    )
+        except httpx.HTTPError:
+            pass
+    except Exception as exc:
+        detail = _extract_detail(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
+        try:
+            await http_client.patch(
+                f"{INSTRUCTION_SERVICE_URL}/instructions/{instruction_id}",
+                json={"status": "failed", "vlm_observation": f"Error: {detail}"},
+            )
+        except httpx.HTTPError:
+            pass
 
 
 @app.get("/history")

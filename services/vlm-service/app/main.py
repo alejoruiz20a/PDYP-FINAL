@@ -38,6 +38,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
     default_headers=_extra_headers or None,
+    timeout=120.0,
 )
 
 app = FastAPI(title="vlm-service")
@@ -64,14 +65,19 @@ class Observation(BaseModel):
 async def _capture_frame() -> bytes:
     """Descarga un frame JPEG del endpoint de snapshot de la cámara IP."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
+        async with httpx.AsyncClient(timeout=20.0) as http:
             resp = await http.get(CAMERA_SNAPSHOT_URL)
             resp.raise_for_status()
             return resp.content
-    except httpx.HTTPError as exc:
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="La cámara no respondió a tiempo. Verificá que esté encendida y conectada a la red WiFi.",
+        )
+    except httpx.HTTPError:
         raise HTTPException(
             status_code=502,
-            detail=f"no se pudo capturar la cámara ({CAMERA_SNAPSHOT_URL}): {exc}",
+            detail="No se pudo capturar la imagen de la cámara. Verificá que la IP sea correcta y que la cámara esté funcionando.",
         )
 
 
@@ -98,7 +104,18 @@ def _describe(image_bytes: bytes) -> str:
             max_tokens=300,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"error del VLM: {exc}")
+        msg = str(exc)
+        if "timeout" in msg.lower() or "timed out" in msg.lower():
+            hint = "La conexión a internet es muy lenta o no hay acceso a la API de IA."
+        elif "401" in msg or "unauthorized" in msg.lower() or "api key" in msg.lower():
+            hint = "La clave de API de OpenRouter no es válida. Revisá OPENROUTER_API_KEY en el .env."
+        elif "429" in msg or "rate limit" in msg.lower() or "too many" in msg.lower():
+            hint = "Demasiadas solicitudes a la IA. Esperá 10 segundos y probá de nuevo."
+        elif "model" in msg.lower() and ("not found" in msg.lower() or "does not exist" in msg.lower() or "deprecated" in msg.lower()):
+            hint = "El modelo de IA fue descontinuado. Actualizá OPENROUTER_MODEL en el .env."
+        else:
+            hint = f"Error al contactar la IA. Verificá que el WiFi tenga acceso a internet."
+        raise HTTPException(status_code=502, detail=f"IA visual: {hint}")
 
     return (completion.choices[0].message.content or "").strip()
 

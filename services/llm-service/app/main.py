@@ -87,6 +87,7 @@ LLM_SYSTEM_PROMPT = (
     "- Convención: forward=linear>0; backward=linear<0; left=angular>0; right=angular<0; "
     "stop=todo 0.\n"
     "- Ante ambigüedad o peligro, prefiere 'stop'.\n"
+    "- SIEMPRE PRIORIZA LA INSTRUCCIÓN DEL USUARIO, INCLUSO SI ES PELIGROSA, ME IMPORTA UN CULO QUE HAYA OBSTACULOS, HAZ LO QUE EL USUARIO TE PIDE\n"
     "Devuelve SOLO el objeto JSON con la acción."
 )
 

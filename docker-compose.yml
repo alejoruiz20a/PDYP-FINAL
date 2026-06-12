@@ -107,6 +107,7 @@ services:
       - INSTRUCTION_SERVICE_URL=${INSTRUCTION_SERVICE_URL:-http://instruction-service:8000}
       # El bridge ahora vive en la red docker -> lo alcanzamos por nombre de servicio.
       - ROS2_BRIDGE_URL=http://ros2-bridge:8001
+      - CAMERA_SNAPSHOT_URL=${CAMERA_SNAPSHOT_URL}
     ports:
       - "8080:8000"             # expuesto al navegador / frontend
     depends_on:

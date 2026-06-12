@@ -9,8 +9,9 @@ export async function sendCommand(text) {
     body: JSON.stringify({ text }),
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`Gateway ${res.status}: ${detail}`);
+    const body = await res.json().catch(() => null);
+    const detail = body?.detail || `Error inesperado del servidor (código ${res.status})`;
+    throw new Error(detail);
   }
   return res.json();
 }
@@ -27,4 +28,19 @@ export async function getHistory(limit = 30) {
   const res = await fetch(`${BASE}/history?limit=${limit}`);
   if (!res.ok) throw new Error(`No se pudo cargar el historial (${res.status})`);
   return res.json();
+}
+
+/** Obtiene la configuración de la cámara desde el gateway. */
+export async function getCameraConfig() {
+  const res = await fetch(`${BASE}/camera/config`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Busca una instrucción individual por ID en el historial. */
+export async function getInstruction(id) {
+  const res = await fetch(`${BASE}/history?limit=50`);
+  if (!res.ok) throw new Error(`Error al consultar historial (${res.status})`);
+  const items = await res.json();
+  return items.find((i) => i.id === id) || null;
 }

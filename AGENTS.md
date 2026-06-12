@@ -63,6 +63,17 @@ pio run -t upload
 - **PWM frequency**: Use **500-1000Hz** for L298N DC motors. Higher frequencies (5000Hz) cause whining without rotation.
 - **ESP32 ↔ L298N wiring**: `ENA=25, IN1=26, IN2=27, ENB=33, IN3=32, IN4=14`. Remove ENA/ENB jumpers. Share GND.
 
+## Frontend Design (Mission Control Theme)
+
+- **Theme**: "Puesto de Control" — dark cockpit dashboard with warm amber accent (`#F59E0B`). Not the green-on-black AI template.
+- **Typography**: Unbounded (display headings), Inter (body), JetBrains Mono (data/monospace). Google Fonts loaded in `index.html`.
+- **Layout**: Camera viewport as full-width hero; control panel + last action side-by-side; full-width history list below.
+- **Signature element**: Camera viewport treated as a "viewing window" with instrument-border treatment (double-border with amber accents).
+- **Key files**: `frontend/src/App.jsx` (UI components + state), `frontend/src/index.css` (design tokens + all styles), `frontend/src/lib/api.js` (API client).
+- **State handling**: Empty state (no commands yet), loading (spinner on send), error (alert banner), result (action chip with glyphs).
+- **Emergency stop**: Topbar button calls `POST /stop` independent of command flow.
+- **Camera**: Placeholder UI ready; `cameraUrl` state in App — backend integration deferred.
+
 ## Network (Windows + Docker Desktop)
 
 - All services on `ros2net` (bridge) network; communicate by service name.

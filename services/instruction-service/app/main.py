@@ -12,7 +12,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from .models import InstructionCreate, InstructionOut
+from bson import ObjectId
+
+from .models import InstructionCreate, InstructionOut, InstructionUpdate
 
 MONGODB_URI = os.environ["MONGODB_URI"]
 MONGODB_DB = os.environ.get("MONGODB_DB", "carrito_rc")
@@ -58,6 +60,22 @@ async def create_instruction(payload: InstructionCreate) -> InstructionOut:
     result = await app.state.db[COLLECTION].insert_one(to_insert)
     saved = await app.state.db[COLLECTION].find_one({"_id": result.inserted_id})
     return InstructionOut(**_serialize(saved))
+
+
+@app.patch("/instructions/{id}", response_model=InstructionOut)
+async def update_instruction(id: str, payload: InstructionUpdate) -> InstructionOut:
+    """Actualiza campos de una instrucción existente (usado por el pipeline)."""
+    update = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No hay campos para actualizar")
+    result = await app.state.db[COLLECTION].find_one_and_update(
+        {"_id": ObjectId(id)},
+        {"$set": update},
+        return_document=True,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Instrucción no encontrada")
+    return InstructionOut(**_serialize(result))
 
 
 @app.get("/instructions", response_model=list[InstructionOut])
